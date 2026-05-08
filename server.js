@@ -18,8 +18,8 @@ const PORT = process.env.PORT || 10000;
 const masterPool = mysql.createPool({
     host: 'gateway01.ap-southeast-1.prod.aws.tidbcloud.com',
     port: 4000,
-    user: '31vfRZdqNp1MYPb.root',
-    password: 'ejFDuNHi3zrvkGM9',
+    user: '2tSzSapawqaKnDJ.root',
+    password: 'rqzqXHvnldZmyj4f',
     database: 'test',
     waitForConnections: true,
     connectionLimit: 10,

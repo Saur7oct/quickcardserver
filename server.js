@@ -52,7 +52,7 @@ app.get('/health', (req, res) => {
 app.get('/', (req, res) => {
     res.json({ 
         message: 'Student Management API',
-        endpoints: ['/health', '/login', '/register', '/api/students', '/api/teachers'],
+        endpoints: ['/health', '/login', '/register', '/api/students', '/api/teachers', '/api/houses'],
         status: 'running',
         version: '1.0.0'
     });
@@ -256,6 +256,61 @@ async function createDeveloperDatabase(developerUsername) {
                 INDEX idx_username (username),
                 INDEX idx_developer (developer),
                 INDEX idx_student (student)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        `);
+        
+        // Create houses table
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS houses (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                house_number VARCHAR(100) NOT NULL,
+                street_name VARCHAR(255),
+                city VARCHAR(100),
+                state VARCHAR(100),
+                pincode VARCHAR(20),
+                country VARCHAR(100) DEFAULT 'India',
+                owner_name VARCHAR(255),
+                owner_contact VARCHAR(20),
+                tenant_name VARCHAR(255),
+                tenant_contact VARCHAR(20),
+                rent_amount DECIMAL(10,2),
+                bedrooms INT DEFAULT 0,
+                bathrooms INT DEFAULT 0,
+                area_sqft DECIMAL(10,2),
+                furnished VARCHAR(50),
+                status VARCHAR(50) DEFAULT 'available',
+                description TEXT,
+                image_id VARCHAR(255),
+                created_by VARCHAR(255),
+                developer VARCHAR(255),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+                INDEX idx_house_number (house_number),
+                INDEX idx_developer (developer),
+                INDEX idx_status (status),
+                INDEX idx_city (city),
+                INDEX idx_owner_name (owner_name),
+                INDEX idx_rent_amount (rent_amount)
+            ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+        `);
+        
+        // Create house_images table
+        await connection.query(`
+            CREATE TABLE IF NOT EXISTS house_images (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                image_id VARCHAR(255) UNIQUE NOT NULL,
+                filename VARCHAR(255) NOT NULL,
+                content_type VARCHAR(100),
+                size INT,
+                data LONGBLOB,
+                house_id INT,
+                user_id VARCHAR(255),
+                user_role VARCHAR(50),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                INDEX idx_image_id (image_id),
+                INDEX idx_house_id (house_id),
+                INDEX idx_user_id (user_id),
+                FOREIGN KEY (house_id) REFERENCES houses(id) ON DELETE CASCADE
             ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
         `);
         
@@ -954,6 +1009,548 @@ app.get('/profile', authenticate, (req, res) => {
         message: 'Authentication successful'
     });
 });
+
+// ==================== HOUSE FUNCTIONALITY ====================
+
+// Create house
+app.post('/api/houses', authenticate, authorize(['developer', 'admin', 'subadmin']), upload.single('image'), async (req, res) => {
+    try {
+        const houseData = req.body;
+        
+        if (!houseData.house_number) {
+            return res.status(400).json({ error: 'House number is required' });
+        }
+
+        const connection = req.db;
+        let imageId = null;
+
+        // Check if house already exists
+        const [existingHouse] = await connection.query(
+            'SELECT * FROM houses WHERE house_number = ? AND developer = ?',
+            [houseData.house_number, req.developer || req.username]
+        );
+        
+        if (existingHouse.length > 0) {
+            return res.status(400).json({ error: 'House with this number already exists' });
+        }
+
+        if (req.file) {
+            imageId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+            const fileBuffer = fs.readFileSync(req.file.path);
+            
+            await connection.query(
+                'INSERT INTO house_images (image_id, filename, content_type, size, data, user_id, user_role) VALUES (?, ?, ?, ?, ?, ?, ?)',
+                [imageId, req.file.originalname, req.file.mimetype, req.file.size, fileBuffer, req.username, req.role]
+            );
+            
+            fs.unlinkSync(req.file.path);
+        }
+
+        const [result] = await connection.query(
+            `INSERT INTO houses (
+                house_number, street_name, city, state, pincode, country, 
+                owner_name, owner_contact, tenant_name, tenant_contact, 
+                rent_amount, bedrooms, bathrooms, area_sqft, furnished, 
+                status, description, image_id, created_by, developer
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            [
+                houseData.house_number, houseData.street_name || null, houseData.city || null, 
+                houseData.state || null, houseData.pincode || null, houseData.country || 'India',
+                houseData.owner_name || null, houseData.owner_contact || null, 
+                houseData.tenant_name || null, houseData.tenant_contact || null,
+                houseData.rent_amount || 0, houseData.bedrooms || 0, houseData.bathrooms || 0,
+                houseData.area_sqft || 0, houseData.furnished || 'unfurnished',
+                houseData.status || 'available', houseData.description || null,
+                imageId, req.username, req.developer || req.username
+            ]
+        );
+
+        res.status(201).json({
+            message: "House created successfully",
+            house: { id: result.insertId, ...houseData, imageId }
+        });
+    } catch (error) {
+        console.error('Create house error:', error);
+        if (req.file && fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+        }
+        res.status(500).json({ error: "Failed to create house: " + error.message });
+    }
+});
+
+// Get all houses
+app.get('/api/houses', authenticate, authorize(['developer', 'admin', 'subadmin', 'teacher', 'parent', 'student']), async (req, res) => {
+    try {
+        const connection = req.db;
+        
+        let query = 'SELECT * FROM houses';
+        let queryParams = [];
+        
+        // Filter by user role
+        switch (req.role) {
+            case 'developer':
+            case 'admin':
+            case 'subadmin':
+                query += ' WHERE developer = ? OR developer IS NULL';
+                queryParams = [req.developer || req.username];
+                break;
+                
+            case 'teacher':
+            case 'parent':
+            case 'student':
+                // Show only available houses to non-admin users
+                query += ' WHERE status = ?';
+                queryParams = ['available'];
+                break;
+        }
+        
+        query += ' ORDER BY created_at DESC';
+        
+        const [houses] = await connection.query(query, queryParams);
+        
+        const housesWithImageUrls = houses.map(house => {
+            const houseWithUrl = { ...house };
+            if (house.image_id) {
+                houseWithUrl.imageUrl = `/api/house-images/${house.image_id}`;
+            }
+            return houseWithUrl;
+        });
+        
+        res.json(housesWithImageUrls);
+    } catch (error) {
+        console.error('Get houses error:', error);
+        res.status(500).json({ error: "Failed to fetch houses: " + error.message });
+    }
+});
+
+// Get single house
+app.get('/api/houses/:id', authenticate, authorize(['developer', 'admin', 'subadmin', 'teacher', 'parent', 'student']), async (req, res) => {
+    try {
+        const connection = req.db;
+        
+        const [house] = await connection.query(
+            'SELECT * FROM houses WHERE id = ?',
+            [parseInt(req.params.id)]
+        );
+        
+        if (house.length === 0) {
+            return res.status(404).json({ error: "House not found" });
+        }
+        
+        // Check access permissions
+        let hasAccess = false;
+        
+        switch (req.role) {
+            case 'developer':
+            case 'admin':
+            case 'subadmin':
+                if (house[0].developer === (req.developer || req.username) || house[0].developer === null) {
+                    hasAccess = true;
+                }
+                break;
+                
+            case 'teacher':
+            case 'parent':
+            case 'student':
+                if (house[0].status === 'available') {
+                    hasAccess = true;
+                }
+                break;
+        }
+        
+        if (!hasAccess) {
+            return res.status(403).json({ error: "Access denied" });
+        }
+        
+        if (house[0].image_id) {
+            house[0].imageUrl = `/api/house-images/${house[0].image_id}`;
+        }
+        
+        res.json(house[0]);
+    } catch (error) {
+        console.error('Get house error:', error);
+        res.status(500).json({ error: "Failed to fetch house" });
+    }
+});
+
+// Update house
+app.patch('/api/houses/:id', authenticate, authorize(['developer', 'admin', 'subadmin']), async (req, res) => {
+    try {
+        const connection = req.db;
+        const updateData = req.body;
+        
+        if (!updateData || Object.keys(updateData).length === 0) {
+            return res.status(400).json({ error: 'No update data provided' });
+        }
+        
+        const [existingHouse] = await connection.query(
+            'SELECT * FROM houses WHERE id = ?',
+            [parseInt(req.params.id)]
+        );
+        
+        if (existingHouse.length === 0) {
+            return res.status(404).json({ error: "House not found" });
+        }
+        
+        // Check if user has permission
+        if (existingHouse[0].developer !== (req.developer || req.username)) {
+            return res.status(403).json({ error: "You don't have permission to update this house" });
+        }
+        
+        const allowedFields = [
+            'house_number', 'street_name', 'city', 'state', 'pincode', 'country',
+            'owner_name', 'owner_contact', 'tenant_name', 'tenant_contact',
+            'rent_amount', 'bedrooms', 'bathrooms', 'area_sqft', 'furnished',
+            'status', 'description'
+        ];
+        
+        const updateFields = {};
+        
+        Object.keys(updateData).forEach(field => {
+            if (allowedFields.includes(field)) {
+                updateFields[field] = updateData[field];
+            }
+        });
+        
+        if (Object.keys(updateFields).length === 0) {
+            return res.status(400).json({ error: 'No valid fields provided for update' });
+        }
+        
+        const setClause = Object.keys(updateFields).map(field => `${field} = ?`).join(', ');
+        const values = [...Object.values(updateFields), parseInt(req.params.id)];
+        
+        const [result] = await connection.query(
+            `UPDATE houses SET ${setClause}, updated_at = CURRENT_TIMESTAMP WHERE id = ?`,
+            values
+        );
+        
+        if (result.affectedRows === 0) {
+            return res.status(400).json({ error: "No changes made to house" });
+        }
+        
+        res.json({
+            message: "House updated successfully",
+            updatedFields: Object.keys(updateFields)
+        });
+    } catch (error) {
+        console.error('Update house error:', error);
+        res.status(500).json({ error: "Failed to update house" });
+    }
+});
+
+// Update house image
+app.put('/api/houses/:id/image', authenticate, authorize(['developer', 'admin', 'subadmin']), upload.single('image'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ error: 'Image file is required' });
+        }
+
+        const connection = req.db;
+
+        const [existingHouse] = await connection.query(
+            'SELECT * FROM houses WHERE id = ?',
+            [parseInt(req.params.id)]
+        );
+
+        if (existingHouse.length === 0) {
+            return res.status(404).json({ error: "House not found" });
+        }
+
+        // Check if user has permission
+        if (existingHouse[0].developer !== (req.developer || req.username)) {
+            return res.status(403).json({ error: "You don't have permission to update this house" });
+        }
+
+        const imageId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
+        const fileBuffer = fs.readFileSync(req.file.path);
+
+        if (existingHouse[0].image_id) {
+            await connection.query(
+                'DELETE FROM house_images WHERE image_id = ?',
+                [existingHouse[0].image_id]
+            );
+        }
+        
+        await connection.query(
+            `INSERT INTO house_images (image_id, filename, content_type, size, data, house_id, user_id, user_role) 
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+            [imageId, req.file.originalname, req.file.mimetype, req.file.size, fileBuffer, parseInt(req.params.id), req.username, req.role]
+        );
+
+        await connection.query(
+            'UPDATE houses SET image_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?',
+            [imageId, parseInt(req.params.id)]
+        );
+        
+        fs.unlinkSync(req.file.path);
+        
+        res.json({
+            message: "House image updated successfully",
+            imageId,
+            imageUrl: `/api/house-images/${imageId}`
+        });
+    } catch (error) {
+        console.error('Update house image error:', error);
+        if (req.file && fs.existsSync(req.file.path)) {
+            fs.unlinkSync(req.file.path);
+        }
+        res.status(500).json({ error: "Failed to update house image" });
+    }
+});
+
+// Delete house
+app.delete('/api/houses/:id', authenticate, authorize(['developer', 'admin', 'subadmin']), async (req, res) => {
+    try {
+        const connection = req.db;
+
+        const [house] = await connection.query(
+            'SELECT * FROM houses WHERE id = ?',
+            [parseInt(req.params.id)]
+        );
+
+        if (house.length === 0) {
+            return res.status(404).json({ error: "House not found" });
+        }
+
+        // Check if user has permission
+        if (house[0].developer !== (req.developer || req.username)) {
+            return res.status(403).json({ error: "You don't have permission to delete this house" });
+        }
+
+        if (house[0].image_id) {
+            await connection.query(
+                'DELETE FROM house_images WHERE image_id = ?',
+                [house[0].image_id]
+            );
+        }
+
+        await connection.query(
+            'DELETE FROM houses WHERE id = ?',
+            [parseInt(req.params.id)]
+        );
+        
+        res.json({ message: "House deleted successfully" });
+    } catch (error) {
+        console.error('Delete house error:', error);
+        res.status(500).json({ error: "Failed to delete house" });
+    }
+});
+
+// Get houses by status
+app.get('/api/houses/status/:status', authenticate, authorize(['developer', 'admin', 'subadmin', 'teacher', 'parent', 'student']), async (req, res) => {
+    try {
+        const { status } = req.params;
+        const connection = req.db;
+        
+        let query = 'SELECT * FROM houses WHERE status = ?';
+        let queryParams = [status];
+        
+        if (['developer', 'admin', 'subadmin'].includes(req.role)) {
+            query += ' AND (developer = ? OR developer IS NULL)';
+            queryParams.push(req.developer || req.username);
+        }
+        
+        query += ' ORDER BY created_at DESC';
+        
+        const [houses] = await connection.query(query, queryParams);
+        
+        const housesWithImageUrls = houses.map(house => {
+            if (house.image_id) {
+                house.imageUrl = `/api/house-images/${house.image_id}`;
+            }
+            return house;
+        });
+        
+        res.json(housesWithImageUrls);
+    } catch (error) {
+        console.error('Get houses by status error:', error);
+        res.status(500).json({ error: "Failed to fetch houses" });
+    }
+});
+
+// Get houses by city
+app.get('/api/houses/city/:city', authenticate, authorize(['developer', 'admin', 'subadmin', 'teacher', 'parent', 'student']), async (req, res) => {
+    try {
+        const { city } = req.params;
+        const connection = req.db;
+        
+        let query = 'SELECT * FROM houses WHERE city = ?';
+        let queryParams = [city];
+        
+        if (['developer', 'admin', 'subadmin'].includes(req.role)) {
+            query += ' AND (developer = ? OR developer IS NULL)';
+            queryParams.push(req.developer || req.username);
+        } else {
+            query += ' AND status = "available"';
+        }
+        
+        query += ' ORDER BY created_at DESC';
+        
+        const [houses] = await connection.query(query, queryParams);
+        
+        const housesWithImageUrls = houses.map(house => {
+            if (house.image_id) {
+                house.imageUrl = `/api/house-images/${house.image_id}`;
+            }
+            return house;
+        });
+        
+        res.json(housesWithImageUrls);
+    } catch (error) {
+        console.error('Get houses by city error:', error);
+        res.status(500).json({ error: "Failed to fetch houses" });
+    }
+});
+
+// Get houses by rent range
+app.get('/api/houses/rent-range', authenticate, authorize(['developer', 'admin', 'subadmin', 'teacher', 'parent', 'student']), async (req, res) => {
+    try {
+        const { min, max } = req.query;
+        const connection = req.db;
+        
+        let query = 'SELECT * FROM houses WHERE rent_amount BETWEEN ? AND ?';
+        let queryParams = [min || 0, max || 100000];
+        
+        if (['developer', 'admin', 'subadmin'].includes(req.role)) {
+            query += ' AND (developer = ? OR developer IS NULL)';
+            queryParams.push(req.developer || req.username);
+        } else {
+            query += ' AND status = "available"';
+        }
+        
+        query += ' ORDER BY rent_amount ASC';
+        
+        const [houses] = await connection.query(query, queryParams);
+        
+        const housesWithImageUrls = houses.map(house => {
+            if (house.image_id) {
+                house.imageUrl = `/api/house-images/${house.image_id}`;
+            }
+            return house;
+        });
+        
+        res.json(housesWithImageUrls);
+    } catch (error) {
+        console.error('Get houses by rent range error:', error);
+        res.status(500).json({ error: "Failed to fetch houses" });
+    }
+});
+
+// Search houses
+app.get('/api/houses/search', authenticate, authorize(['developer', 'admin', 'subadmin', 'teacher', 'parent', 'student']), async (req, res) => {
+    try {
+        const { q } = req.query;
+        const connection = req.db;
+        
+        let query = `SELECT * FROM houses WHERE 
+            house_number LIKE ? OR 
+            street_name LIKE ? OR 
+            city LIKE ? OR 
+            owner_name LIKE ? OR 
+            description LIKE ?`;
+        let queryParams = [`%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`, `%${q}%`];
+        
+        if (['developer', 'admin', 'subadmin'].includes(req.role)) {
+            query += ' AND (developer = ? OR developer IS NULL)';
+            queryParams.push(req.developer || req.username);
+        } else {
+            query += ' AND status = "available"';
+        }
+        
+        query += ' ORDER BY created_at DESC';
+        
+        const [houses] = await connection.query(query, queryParams);
+        
+        const housesWithImageUrls = houses.map(house => {
+            if (house.image_id) {
+                house.imageUrl = `/api/house-images/${house.image_id}`;
+            }
+            return house;
+        });
+        
+        res.json(housesWithImageUrls);
+    } catch (error) {
+        console.error('Search houses error:', error);
+        res.status(500).json({ error: "Failed to search houses" });
+    }
+});
+
+// Get houses summary statistics
+app.get('/api/houses/stats/summary', authenticate, authorize(['developer', 'admin', 'subadmin']), async (req, res) => {
+    try {
+        const connection = req.db;
+        
+        const [totalHouses] = await connection.query(
+            'SELECT COUNT(*) as total FROM houses WHERE developer = ? OR developer IS NULL',
+            [req.developer || req.username]
+        );
+        
+        const [availableHouses] = await connection.query(
+            'SELECT COUNT(*) as available FROM houses WHERE status = "available" AND (developer = ? OR developer IS NULL)',
+            [req.developer || req.username]
+        );
+        
+        const [rentedHouses] = await connection.query(
+            'SELECT COUNT(*) as rented FROM houses WHERE status = "rented" AND (developer = ? OR developer IS NULL)',
+            [req.developer || req.username]
+        );
+        
+        const [avgRent] = await connection.query(
+            'SELECT AVG(rent_amount) as avgRent FROM houses WHERE (developer = ? OR developer IS NULL)',
+            [req.developer || req.username]
+        );
+        
+        const [totalBedrooms] = await connection.query(
+            'SELECT SUM(bedrooms) as totalBedrooms FROM houses WHERE (developer = ? OR developer IS NULL)',
+            [req.developer || req.username]
+        );
+        
+        res.json({
+            total: totalHouses[0].total,
+            available: availableHouses[0].available,
+            rented: rentedHouses[0].rented,
+            averageRent: avgRent[0].avgRent || 0,
+            totalBedrooms: totalBedrooms[0].totalBedrooms || 0
+        });
+    } catch (error) {
+        console.error('Get house stats error:', error);
+        res.status(500).json({ error: "Failed to fetch house statistics" });
+    }
+});
+
+// Serve house images
+app.get('/api/house-images/:id', authenticate, async (req, res) => {
+    try {
+        const connection = req.db;
+
+        const [images] = await connection.query(
+            'SELECT * FROM house_images WHERE image_id = ?',
+            [req.params.id]
+        );
+
+        if (images.length === 0) {
+            return res.status(404).json({ error: 'House image not found' });
+        }
+
+        const image = images[0];
+        
+        res.set({
+            'Content-Type': image.content_type || 'image/jpeg',
+            'Content-Length': image.size,
+            'Content-Disposition': `inline; filename="${image.filename}"`,
+            'Cache-Control': 'public, max-age=31536000'
+        });
+
+        res.send(image.data);
+    } catch (error) {
+        console.error('House image serve error:', error);
+        if (!res.headersSent) {
+            res.status(500).json({ error: 'Error serving house image' });
+        }
+    }
+});
+
+// ==================== END OF HOUSE FUNCTIONALITY ====================
 
 // Create student with details
 app.post('/api/students', authenticate, authorize(['developer', 'admin', 'subadmin', 'teacher']), upload.single('image'), async (req, res) => {
@@ -2502,6 +3099,7 @@ async function startServer() {
             console.log(`✅ Ready to accept requests`);
             console.log(`📊 API endpoints available at http://localhost:${port}`);
             console.log(`💚 Health check: http://localhost:${port}/health`);
+            console.log(`🏠 House endpoints: http://localhost:${port}/api/houses`);
         });
     } catch (error) {
         console.error('❌ Database connection failed:', error.message);

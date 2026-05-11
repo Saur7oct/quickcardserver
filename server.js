@@ -38,9 +38,8 @@ const masterPool = mysql.createPool({
 
     port: 4000,
 
-    user: '31vfRZdqNp1MYPb.root',
-
-    password: 'ejFDuNHi3zrvkGM9',
+   user: '2tSzSapawqaKnDJ.root',
+    password: 'rqzqXHvnldZmyj4f',
 
     database: 'test',
 
